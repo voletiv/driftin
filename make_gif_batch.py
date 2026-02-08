@@ -92,56 +92,84 @@ def ddim_intermediates(model, schedule, z, n_steps=50):
 
 def make_frame(ddpm_grid, drift_grid, step, total, elapsed_ms, drift_ms,
                drift_done=True, done=False):
-    GAP = 40
-    MARGIN = 20
+    """Vertical layout: DDPM top, Drift bottom, padded to square."""
     gw, gh = ddpm_grid.size
-    W = MARGIN * 2 + gw * 2 + GAP
-    H = gh + 130
-    frame = Image.new("RGB", (W, H), (15, 15, 15))
+    MARGIN = 20
+    LABEL_H = 26
+    INFO_H = 42
+    GAP = 14
+    TITLE_H = 38
+    FOOTER_H = 42
+
+    content_w = gw + MARGIN * 2
+    content_h = TITLE_H + (LABEL_H + gh + INFO_H) * 2 + GAP + FOOTER_H
+
+    # Pad to square
+    S = max(content_w, content_h)
+    frame = Image.new("RGB", (S, S), (15, 15, 15))
     draw = ImageDraw.Draw(frame)
 
-    font_title = get_font(20)
-    font_label = get_font(15)
-    font_time = get_font(13)
-    font_big = get_font(24)
+    # Offset to center content in the square
+    ox = (S - content_w) // 2
+    oy = (S - content_h) // 2
 
-    draw.text((W // 2, 10), "Batch Generation: DDPM vs Drifting",
+    font_title = get_font(18)
+    font_label = get_font(14)
+    font_time = get_font(12)
+    font_big = get_font(22)
+
+    cx = S // 2
+
+    # Title
+    draw.text((cx, oy + 8), "Batch Generation: DDPM vs Drifting",
               fill=(230, 230, 230), font=font_title, anchor="mt")
 
-    y_img = 48
-    x_ddpm = MARGIN
-    draw.rectangle([x_ddpm - 2, y_img - 2, x_ddpm + gw + 1, y_img + gh + 1],
-                   outline=(100, 200, 255), width=2)
-    frame.paste(ddpm_grid, (x_ddpm, y_img))
-    draw.text((x_ddpm + gw // 2, y_img - 6), "DDPM (50 steps)",
-              fill=(100, 200, 255), font=font_label, anchor="mb")
+    # --- Top row: DDPM ---
+    y_ddpm_label = oy + TITLE_H
+    y_ddpm_img = y_ddpm_label + LABEL_H
+    x_img = ox + MARGIN
+    color_ddpm = (100, 200, 255)
+
+    draw.text((cx, y_ddpm_label + 2), "DDPM (50 steps)",
+              fill=color_ddpm, font=font_label, anchor="mt")
+    draw.rectangle([x_img - 2, y_ddpm_img - 2,
+                    x_img + gw + 1, y_ddpm_img + gh + 1],
+                   outline=color_ddpm, width=2)
+    frame.paste(ddpm_grid, (x_img, y_ddpm_img))
+
     step_text = f"Step {step}/{total}" if not done else f"Done! ({total} steps)"
-    draw.text((x_ddpm + gw // 2, y_img + gh + 6), step_text,
+    draw.text((cx, y_ddpm_img + gh + 4), step_text,
               fill=(180, 180, 180), font=font_time, anchor="mt")
-    draw.text((x_ddpm + gw // 2, y_img + gh + 24), f"{elapsed_ms:.0f} ms",
+    draw.text((cx, y_ddpm_img + gh + 20), f"{elapsed_ms:.0f} ms",
               fill=(180, 180, 180), font=font_time, anchor="mt")
 
-    x_drift = x_ddpm + gw + GAP
-    draw.rectangle([x_drift - 2, y_img - 2, x_drift + gw + 1, y_img + gh + 1],
-                   outline=(120, 230, 140), width=2)
-    frame.paste(drift_grid, (x_drift, y_img))
-    draw.text((x_drift + gw // 2, y_img - 6), "Drifting (1 step)",
-              fill=(120, 230, 140), font=font_label, anchor="mb")
+    # --- Bottom row: Drift ---
+    y_drift_label = y_ddpm_img + gh + INFO_H + GAP
+    y_drift_img = y_drift_label + LABEL_H
+    color_drift = (120, 230, 140)
+
+    draw.text((cx, y_drift_label + 2), "Drifting (1 step)",
+              fill=color_drift, font=font_label, anchor="mt")
+    draw.rectangle([x_img - 2, y_drift_img - 2,
+                    x_img + gw + 1, y_drift_img + gh + 1],
+                   outline=color_drift, width=2)
+    frame.paste(drift_grid, (x_img, y_drift_img))
 
     if drift_done:
-        draw.text((x_drift + gw // 2, y_img + gh + 6), "Done! (1 step)",
-                  fill=(120, 230, 140), font=font_time, anchor="mt")
-        draw.text((x_drift + gw // 2, y_img + gh + 24), f"{drift_ms:.1f} ms",
-                  fill=(120, 230, 140), font=font_time, anchor="mt")
+        draw.text((cx, y_drift_img + gh + 4), "Done! (1 step)",
+                  fill=color_drift, font=font_time, anchor="mt")
+        draw.text((cx, y_drift_img + gh + 20), f"{drift_ms:.1f} ms",
+                  fill=color_drift, font=font_time, anchor="mt")
     else:
-        draw.text((x_drift + gw // 2, y_img + gh + 6), "Waiting...",
+        draw.text((cx, y_drift_img + gh + 4), "Waiting...",
                   fill=(180, 180, 180), font=font_time, anchor="mt")
 
+    # Footer: speedup
     if done:
         speedup = elapsed_ms / drift_ms
-        draw.text((W // 2, H - 12),
+        draw.text((cx, oy + content_h - 6),
                   f"Drifting: {speedup:.0f}x faster",
-                  fill=(120, 230, 140), font=font_big, anchor="mb")
+                  fill=color_drift, font=font_big, anchor="mb")
 
     return frame
 

@@ -62,61 +62,75 @@ def get_font(size):
 
 def make_frame(ddpm_img, drift_img, step, total_steps, elapsed_ms, drift_ms,
                drift_done=True, ddpm_done=False):
-    """Compose a single frame: DDPM left, Drift right, with labels."""
-    W = IMG_PX * 2 + 60 + 40
-    H = IMG_PX + 120
+    """Compose a single frame: DDPM top, Drift bottom, stacked vertically."""
+    MARGIN = 20
+    ROW_LABEL_H = 28      # label above each image
+    ROW_INFO_H = 44       # step + ms below each image
+    GAP = 16              # vertical gap between rows
+    TITLE_H = 40
+    FOOTER_H = 44
+
+    W = MARGIN * 2 + IMG_PX
+    H = (TITLE_H + (ROW_LABEL_H + IMG_PX + ROW_INFO_H) * 2 + GAP + FOOTER_H)
     frame = Image.new("RGB", (W, H), (15, 15, 15))
     draw = ImageDraw.Draw(frame)
 
-    font_title = get_font(22)
-    font_label = get_font(16)
-    font_time = get_font(14)
-    font_big = get_font(28)
+    font_title = get_font(20)
+    font_label = get_font(15)
+    font_time = get_font(13)
+    font_big = get_font(26)
 
-    draw.text((W // 2, 12), "DDPM vs Drifting -- Same UNet (38M params)",
+    cx = W // 2
+
+    # Title
+    draw.text((cx, 10), "Same UNet (38M params)",
               fill=(230, 230, 230), font=font_title, anchor="mt")
 
-    # Left: DDPM
-    x_ddpm = 20
-    y_img = 50
+    # --- Top row: DDPM ---
+    y_ddpm_label = TITLE_H
+    y_ddpm_img = y_ddpm_label + ROW_LABEL_H
     color_ddpm = (100, 200, 255)
-    draw.rectangle([x_ddpm - 2, y_img - 2, x_ddpm + IMG_PX + 1, y_img + IMG_PX + 1],
-                   outline=color_ddpm, width=2)
-    frame.paste(ddpm_img, (x_ddpm, y_img))
 
-    draw.text((x_ddpm + IMG_PX // 2, y_img - 8), "DDPM (50 DDIM steps)",
-              fill=color_ddpm, font=font_label, anchor="mb")
+    draw.text((cx, y_ddpm_label + 4), "DDPM (50 DDIM steps)",
+              fill=color_ddpm, font=font_label, anchor="mt")
+    draw.rectangle([MARGIN - 2, y_ddpm_img - 2,
+                    MARGIN + IMG_PX + 1, y_ddpm_img + IMG_PX + 1],
+                   outline=color_ddpm, width=2)
+    frame.paste(ddpm_img, (MARGIN, y_ddpm_img))
 
     step_text = f"Step {step}/{total_steps}"
     if ddpm_done:
         step_text = f"Done! ({total_steps} steps)"
-    draw.text((x_ddpm + IMG_PX // 2, y_img + IMG_PX + 8),
+    draw.text((cx, y_ddpm_img + IMG_PX + 6),
               step_text, fill=(180, 180, 180), font=font_time, anchor="mt")
-    draw.text((x_ddpm + IMG_PX // 2, y_img + IMG_PX + 28),
+    draw.text((cx, y_ddpm_img + IMG_PX + 24),
               f"{elapsed_ms:.0f} ms", fill=(180, 180, 180), font=font_time, anchor="mt")
 
-    # Right: Drift
-    x_drift = x_ddpm + IMG_PX + 60
+    # --- Bottom row: Drift ---
+    y_drift_label = y_ddpm_img + IMG_PX + ROW_INFO_H + GAP
+    y_drift_img = y_drift_label + ROW_LABEL_H
     color_drift = (120, 230, 140)
-    draw.rectangle([x_drift - 2, y_img - 2, x_drift + IMG_PX + 1, y_img + IMG_PX + 1],
-                   outline=color_drift, width=2)
-    frame.paste(drift_img, (x_drift, y_img))
 
-    draw.text((x_drift + IMG_PX // 2, y_img - 8), "Drifting (1 step)",
-              fill=color_drift, font=font_label, anchor="mb")
+    draw.text((cx, y_drift_label + 4), "Drifting (1 step)",
+              fill=color_drift, font=font_label, anchor="mt")
+    draw.rectangle([MARGIN - 2, y_drift_img - 2,
+                    MARGIN + IMG_PX + 1, y_drift_img + IMG_PX + 1],
+                   outline=color_drift, width=2)
+    frame.paste(drift_img, (MARGIN, y_drift_img))
 
     if drift_done:
-        draw.text((x_drift + IMG_PX // 2, y_img + IMG_PX + 8),
+        draw.text((cx, y_drift_img + IMG_PX + 6),
                   "Done! (1 step)", fill=(120, 230, 140), font=font_time, anchor="mt")
-        draw.text((x_drift + IMG_PX // 2, y_img + IMG_PX + 28),
+        draw.text((cx, y_drift_img + IMG_PX + 24),
                   f"{drift_ms:.1f} ms", fill=(120, 230, 140), font=font_time, anchor="mt")
     else:
-        draw.text((x_drift + IMG_PX // 2, y_img + IMG_PX + 8),
+        draw.text((cx, y_drift_img + IMG_PX + 6),
                   "Waiting...", fill=(180, 180, 180), font=font_time, anchor="mt")
 
+    # Footer: speedup
     if ddpm_done:
         speedup = elapsed_ms / drift_ms
-        draw.text((W // 2, H - 10),
+        draw.text((cx, H - 8),
                   f"Drifting: {speedup:.0f}x faster",
                   fill=(120, 230, 140), font=font_big, anchor="mb")
 

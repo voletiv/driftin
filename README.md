@@ -213,6 +213,10 @@ The quality gap between drifting and diffusion is real. But DINOv2 features clos
 
 The dream: train on 1000 GPUs for a month, serve on a single consumer GPU at 60 FPS. Diffusion fundamentally cannot do this. Drifting can.
 
+## Acknowledgments
+
+Multi-GPU training experiments were run on 8x H100 GPUs provided by [Voltage Park](https://www.voltagepark.com/). Thank you for the compute sponsorship.
+
 ## Citation
 
 If you use this code or find our results useful:

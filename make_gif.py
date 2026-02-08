@@ -61,10 +61,10 @@ def get_font(size):
 
 
 def make_frame(ddpm_img, drift_img, step, total_steps, elapsed_ms, drift_ms,
-               ddpm_done=False):
+               drift_done=True, ddpm_done=False):
     """Compose a single frame: DDPM left, Drift right, with labels."""
-    W = IMG_PX * 2 + 60 + 40  # two images + gap + margins
-    H = IMG_PX + 120  # image + top/bottom labels
+    W = IMG_PX * 2 + 60 + 40
+    H = IMG_PX + 120
     frame = Image.new("RGB", (W, H), (15, 15, 15))
     draw = ImageDraw.Draw(frame)
 
@@ -73,24 +73,20 @@ def make_frame(ddpm_img, drift_img, step, total_steps, elapsed_ms, drift_ms,
     font_time = get_font(14)
     font_big = get_font(28)
 
-    # Title
     draw.text((W // 2, 12), "DDPM vs Drifting -- Same UNet (38M params)",
               fill=(230, 230, 230), font=font_title, anchor="mt")
 
     # Left: DDPM
     x_ddpm = 20
     y_img = 50
-    # Border color: blue for DDPM
     color_ddpm = (100, 200, 255)
     draw.rectangle([x_ddpm - 2, y_img - 2, x_ddpm + IMG_PX + 1, y_img + IMG_PX + 1],
                    outline=color_ddpm, width=2)
     frame.paste(ddpm_img, (x_ddpm, y_img))
 
-    # DDPM label
     draw.text((x_ddpm + IMG_PX // 2, y_img - 8), "DDPM (50 DDIM steps)",
               fill=color_ddpm, font=font_label, anchor="mb")
 
-    # Step counter
     step_text = f"Step {step}/{total_steps}"
     if ddpm_done:
         step_text = f"Done! ({total_steps} steps)"
@@ -106,17 +102,18 @@ def make_frame(ddpm_img, drift_img, step, total_steps, elapsed_ms, drift_ms,
                    outline=color_drift, width=2)
     frame.paste(drift_img, (x_drift, y_img))
 
-    # Drift label
     draw.text((x_drift + IMG_PX // 2, y_img - 8), "Drifting (1 step)",
               fill=color_drift, font=font_label, anchor="mb")
 
-    # Drift timing
-    draw.text((x_drift + IMG_PX // 2, y_img + IMG_PX + 8),
-              "Done! (1 step)", fill=(180, 180, 180), font=font_time, anchor="mt")
-    draw.text((x_drift + IMG_PX // 2, y_img + IMG_PX + 28),
-              f"{drift_ms:.1f} ms", fill=(180, 180, 180), font=font_time, anchor="mt")
+    if drift_done:
+        draw.text((x_drift + IMG_PX // 2, y_img + IMG_PX + 8),
+                  "Done! (1 step)", fill=(120, 230, 140), font=font_time, anchor="mt")
+        draw.text((x_drift + IMG_PX // 2, y_img + IMG_PX + 28),
+                  f"{drift_ms:.1f} ms", fill=(120, 230, 140), font=font_time, anchor="mt")
+    else:
+        draw.text((x_drift + IMG_PX // 2, y_img + IMG_PX + 8),
+                  "Waiting...", fill=(180, 180, 180), font=font_time, anchor="mt")
 
-    # Speed comparison at bottom
     if ddpm_done:
         speedup = elapsed_ms / drift_ms
         draw.text((W // 2, H - 10),
@@ -209,44 +206,58 @@ def main():
     drift_pil = tensor_to_pil(drift_out[0])
     ddpm_pils = [tensor_to_pil(x[0]) for x in intermediates]
 
-    # Generate frames
-    # We want the GIF to play at roughly 10x slow-mo so people can see the DDPM process
-    # Each DDIM step takes ~8ms real time, we show each as one GIF frame
-    # Frame duration = 80ms (12.5 fps) to give ~10x slow-mo feel
+    # Convert noise to PIL for the "before" state
+    noise_pil = tensor_to_pil(intermediates[0][0])
+
     print("Generating frames...")
     frames = []
-
     n_steps = 50
 
-    # Frame 0: both start as noise, drift already done
-    # Show 3 frames of pure noise on DDPM side before it "starts"
-    for i in range(3):
-        f = make_frame(ddpm_pils[0], drift_pil,
+    # Phase 1: Both start as noise (3 frames)
+    for _ in range(3):
+        f = make_frame(ddpm_pils[0], noise_pil,
                        step=0, total_steps=n_steps,
-                       elapsed_ms=0, drift_ms=drift_ms)
+                       elapsed_ms=0, drift_ms=drift_ms,
+                       drift_done=False)
         frames.append(f)
 
-    # Frames 1-50: DDPM denoising, one frame per DDIM step
-    for step in range(1, n_steps + 1):
+    # Phase 2: Frame 1 -- drift SNAPS to final image instantly, DDPM begins denoising
+    # This single-frame transition is the whole point
+    f = make_frame(ddpm_pils[1], drift_pil,
+                   step=1, total_steps=n_steps,
+                   elapsed_ms=per_step_ms, drift_ms=drift_ms,
+                   drift_done=True)
+    frames.append(f)
+
+    # Phase 3: Frames 2-50 -- DDPM continues denoising, drift side is FROZEN
+    # We render drift_pil into a single static image and reuse the exact same
+    # PIL object so there is zero pixel variation across frames
+    for step in range(2, n_steps + 1):
         elapsed = step * per_step_ms
         f = make_frame(ddpm_pils[step], drift_pil,
                        step=step, total_steps=n_steps,
                        elapsed_ms=elapsed, drift_ms=drift_ms,
+                       drift_done=True,
                        ddpm_done=(step == n_steps))
         frames.append(f)
 
     # Hold on final frame
     for _ in range(20):
-        f = make_frame(ddpm_pils[-1], drift_pil,
-                       step=n_steps, total_steps=n_steps,
-                       elapsed_ms=ddpm_ms, drift_ms=drift_ms,
-                       ddpm_done=True)
-        frames.append(f)
+        frames.append(frames[-1].copy())
 
-    # Save GIF
+    # Build a single global palette from the final frame to prevent per-frame
+    # requantization (which causes pixel flicker on the static drift side)
+    print("Quantizing to global palette...")
+    palette_img = frames[-1].quantize(colors=256, method=Image.Quantize.MEDIANCUT)
+    palette = palette_img.getpalette()
+    quantized = []
+    for f in frames:
+        q = f.quantize(palette=palette_img, dither=Image.Dither.NONE)
+        quantized.append(q)
+
     gif_path = "outputs/drifting_vs_diffusion.gif"
-    frames[0].save(gif_path, save_all=True, append_images=frames[1:],
-                   duration=80, loop=0)
+    quantized[0].save(gif_path, save_all=True, append_images=quantized[1:],
+                      duration=80, loop=0)
     print(f"Saved GIF: {gif_path} ({len(frames)} frames)")
 
     # Also save the final comparison as a static image

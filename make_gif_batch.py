@@ -90,7 +90,8 @@ def ddim_intermediates(model, schedule, z, n_steps=50):
     return intermediates
 
 
-def make_frame(ddpm_grid, drift_grid, step, total, elapsed_ms, drift_ms, done=False):
+def make_frame(ddpm_grid, drift_grid, step, total, elapsed_ms, drift_ms,
+               drift_done=True, done=False):
     GAP = 40
     MARGIN = 20
     gw, gh = ddpm_grid.size
@@ -108,7 +109,6 @@ def make_frame(ddpm_grid, drift_grid, step, total, elapsed_ms, drift_ms, done=Fa
               fill=(230, 230, 230), font=font_title, anchor="mt")
 
     y_img = 48
-    # DDPM
     x_ddpm = MARGIN
     draw.rectangle([x_ddpm - 2, y_img - 2, x_ddpm + gw + 1, y_img + gh + 1],
                    outline=(100, 200, 255), width=2)
@@ -121,17 +121,21 @@ def make_frame(ddpm_grid, drift_grid, step, total, elapsed_ms, drift_ms, done=Fa
     draw.text((x_ddpm + gw // 2, y_img + gh + 24), f"{elapsed_ms:.0f} ms",
               fill=(180, 180, 180), font=font_time, anchor="mt")
 
-    # Drift
     x_drift = x_ddpm + gw + GAP
     draw.rectangle([x_drift - 2, y_img - 2, x_drift + gw + 1, y_img + gh + 1],
                    outline=(120, 230, 140), width=2)
     frame.paste(drift_grid, (x_drift, y_img))
     draw.text((x_drift + gw // 2, y_img - 6), "Drifting (1 step)",
               fill=(120, 230, 140), font=font_label, anchor="mb")
-    draw.text((x_drift + gw // 2, y_img + gh + 6), "Done! (1 step)",
-              fill=(180, 180, 180), font=font_time, anchor="mt")
-    draw.text((x_drift + gw // 2, y_img + gh + 24), f"{drift_ms:.1f} ms",
-              fill=(180, 180, 180), font=font_time, anchor="mt")
+
+    if drift_done:
+        draw.text((x_drift + gw // 2, y_img + gh + 6), "Done! (1 step)",
+                  fill=(120, 230, 140), font=font_time, anchor="mt")
+        draw.text((x_drift + gw // 2, y_img + gh + 24), f"{drift_ms:.1f} ms",
+                  fill=(120, 230, 140), font=font_time, anchor="mt")
+    else:
+        draw.text((x_drift + gw // 2, y_img + gh + 6), "Waiting...",
+                  fill=(180, 180, 180), font=font_time, anchor="mt")
 
     if done:
         speedup = elapsed_ms / drift_ms
@@ -182,30 +186,40 @@ def main():
     print(f"DDPM: {ddpm_ms:.1f} ms for {N_IMGS} images")
 
     drift_grid = make_grid(drift_out)
+    noise_grid = make_grid(intermediates[0])
 
     print("Generating frames...")
     frames = []
 
-    # Initial noise frames
+    # Both start as noise
     for _ in range(3):
-        f = make_frame(make_grid(intermediates[0]), drift_grid,
-                       0, 50, 0, drift_ms)
+        f = make_frame(noise_grid, noise_grid, 0, 50, 0, drift_ms, drift_done=False)
         frames.append(f)
 
-    # Denoising frames
-    for step in range(1, 51):
+    # Step 1: drift snaps to final, DDPM begins
+    f = make_frame(make_grid(intermediates[1]), drift_grid,
+                   1, 50, per_step, drift_ms, drift_done=True)
+    frames.append(f)
+
+    # Steps 2-50: DDPM continues, drift frozen
+    for step in range(2, 51):
         f = make_frame(make_grid(intermediates[step]), drift_grid,
                        step, 50, step * per_step, drift_ms,
-                       done=(step == 50))
+                       drift_done=True, done=(step == 50))
         frames.append(f)
 
     # Hold final
     for _ in range(20):
-        frames.append(frames[-1])
+        frames.append(frames[-1].copy())
+
+    # Global palette to prevent per-frame requantization flicker
+    print("Quantizing to global palette...")
+    palette_img = frames[-1].quantize(colors=256, method=Image.Quantize.MEDIANCUT)
+    quantized = [f.quantize(palette=palette_img, dither=Image.Dither.NONE) for f in frames]
 
     gif_path = "outputs/drifting_vs_diffusion_batch.gif"
-    frames[0].save(gif_path, save_all=True, append_images=frames[1:],
-                   duration=80, loop=0)
+    quantized[0].save(gif_path, save_all=True, append_images=quantized[1:],
+                      duration=80, loop=0)
     print(f"Saved: {gif_path} ({len(frames)} frames, {os.path.getsize(gif_path)/1e6:.1f} MB)")
 
 

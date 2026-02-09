@@ -42,6 +42,7 @@ def compute_drift(gen, pos, temp=0.05):
         V: [N, D] drift vectors (in normalized feature space)
     """
     N, D = gen.shape
+    G = N
 
     # Normalize features so avg pairwise distance ~ sqrt(D)
     y_neg = gen  # negatives = generated batch
@@ -131,3 +132,169 @@ def drifting_loss(gen_feats, pos_feats, temps=(0.02, 0.05, 0.2)):
         target = gen_feats.detach() + V
 
     return F.mse_loss(gen_feats, target)
+
+
+# ---------------------------------------------------------------------------
+# Batched versions: operate over L spatial locations simultaneously
+# ---------------------------------------------------------------------------
+
+
+def normalize_features_batched(x, y_all, D):
+    """Batched feature normalization across L spatial locations.
+
+    Args:
+        x: [L, N, D] generated features at L locations
+        y_all: [L, M, D] all reference features at L locations
+        D: feature dimensionality
+
+    Returns:
+        x_norm: [L, N, D] normalized features
+        S: [L] normalization scales (detached)
+    """
+    dists = torch.cdist(x.float(), y_all.float(), p=2)  # [L, N, M]
+    mean_dist = dists.mean(dim=(1, 2))  # [L]
+    S = (mean_dist / math.sqrt(D)).detach().clamp(min=1e-8)  # [L]
+    x_norm = x / S.unsqueeze(-1).unsqueeze(-1)  # [L, N, D]
+    return x_norm, S
+
+
+def normalize_drift_batched(V, D):
+    """Batched drift normalization across L spatial locations.
+
+    Per-location lambda: scales V so E[||V||^2 / D] ~ 1 at each location.
+
+    Args:
+        V: [L, N, D] drift vectors at L locations
+        D: feature dimensionality
+
+    Returns:
+        V_norm: [L, N, D]
+    """
+    # Per-location lambda: [L]
+    lambda_j = torch.sqrt(
+        (V.float().pow(2).sum(dim=-1) / D).mean(dim=-1)
+    ).detach()
+    return V / (lambda_j.unsqueeze(-1).unsqueeze(-1) + 1e-8)
+
+
+def compute_drift_batched(gen, pos, temp=0.05):
+    """Batched drift field over L spatial locations.
+
+    Same algorithm as compute_drift but operating on [L, N, C] tensors.
+    Includes feature normalization and self-exclusion.
+
+    Args:
+        gen: [L, N, D] generated features (detached)
+        pos: [L, N_pos, D] positive features (detached)
+        temp: base temperature
+
+    Returns:
+        V: [L, N, D] drift vectors
+    """
+    L, N, D = gen.shape
+    N_pos = pos.shape[1]
+
+    # Normalize features per location
+    y_neg = gen
+    y_all = torch.cat([pos, y_neg], dim=1)  # [L, N_pos + N, D]
+    gen_n, S = normalize_features_batched(gen, y_all, D)
+    pos_n = pos / S.unsqueeze(-1).unsqueeze(-1)
+    neg_n = gen_n
+
+    targets_n = torch.cat([pos_n, neg_n], dim=1)  # [L, N_pos + N, D]
+
+    gen_f = gen_n.float()
+    targets_f = targets_n.float()
+
+    # Batched distances: [L, N, N_pos + N]
+    dist = torch.cdist(gen_f, targets_f, p=2)
+
+    # Self-exclusion: mask diagonal of gen-to-neg block
+    mask = torch.eye(N, device=gen.device, dtype=dist.dtype).unsqueeze(0) * 1e6  # [1, N, N]
+    # Pad to match target dim: zeros for pos columns, mask for neg columns
+    pad = torch.zeros(1, N, N_pos, device=gen.device, dtype=dist.dtype)
+    full_mask = torch.cat([pad, mask], dim=2)  # [1, N, N_pos + N]
+    dist = dist + full_mask
+
+    # Dimensionality-aware temperature
+    tau_tilde = temp * D
+
+    logit = -dist / tau_tilde
+    A_row = torch.softmax(logit, dim=2)   # over targets
+    A_col = torch.softmax(logit, dim=1)   # over gen samples
+    A = torch.sqrt(A_row * A_col + 1e-30)
+
+    A_pos = A[:, :, :N_pos]   # [L, N, N_pos]
+    A_neg = A[:, :, N_pos:]   # [L, N, N]
+
+    W_pos = A_pos * A_neg.sum(dim=2, keepdim=True)  # [L, N, N_pos]
+    W_neg = A_neg * A_pos.sum(dim=2, keepdim=True)  # [L, N, N]
+
+    drift_pos = torch.bmm(W_pos, targets_f[:, :N_pos])  # [L, N, D]
+    drift_neg = torch.bmm(W_neg, targets_f[:, N_pos:])   # [L, N, D]
+
+    V = (drift_pos - drift_neg).to(gen.dtype)
+    # Un-normalize back to original scale
+    V = V * S.unsqueeze(-1).unsqueeze(-1)
+    return V
+
+
+def compute_drift_multitemp_batched(gen, pos, temps=(0.02, 0.05, 0.2)):
+    """Batched multi-temperature drift field.
+
+    Each temperature's drift is independently normalized per location before summing.
+
+    Args:
+        gen: [L, N, D] generated features (detached)
+        pos: [L, N_pos, D] positive features (detached)
+        temps: tuple of temperatures
+
+    Returns:
+        V_total: [L, N, D]
+    """
+    D = gen.shape[-1]
+    V_total = torch.zeros_like(gen)
+    for temp in temps:
+        V = compute_drift_batched(gen, pos, temp=temp)
+        V = normalize_drift_batched(V, D)
+        V_total = V_total + V
+    return V_total
+
+
+def drifting_loss_multires(gen_groups, pos_groups, temps=(0.02, 0.05, 0.2)):
+    """Compute multi-resolution drifting loss across feature groups.
+
+    Each group is a (features[B, L, C], C_j) tuple. Groups are processed
+    independently with batched drift computation. Losses averaged across groups.
+
+    Gradient flows through gen features back to generator.
+
+    Args:
+        gen_groups: list of (features[B, L, C], C_j) from encoder on generated images
+        pos_groups: list of (features[B, L, C], C_j) from encoder on real images
+        temps: temperatures for multi-temperature drift
+
+    Returns:
+        loss: scalar, averaged across feature groups
+    """
+    total_loss = 0.0
+    n_groups = len(gen_groups)
+
+    for (gen_feat, C_j), (pos_feat, _) in zip(gen_groups, pos_groups):
+        # gen_feat: [B, L, C_j] -- has gradient
+        # pos_feat: [B, L, C_j] -- detached
+
+        with torch.no_grad():
+            # Transpose to [L, B, C_j] for batched computation
+            gen_t = gen_feat.detach().transpose(0, 1).contiguous()
+            pos_t = pos_feat.detach().transpose(0, 1).contiguous()
+
+            # Compute batched multi-temp drift: [L, B, C_j]
+            V = compute_drift_multitemp_batched(gen_t, pos_t, temps=temps)
+
+            # Transpose back: [B, L, C_j]
+            target = gen_feat.detach() + V.transpose(0, 1)
+
+        total_loss = total_loss + F.mse_loss(gen_feat, target)
+
+    return total_loss / n_groups

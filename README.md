@@ -70,6 +70,34 @@ DDPM loss (left) converges cleanly from 0.045 to 0.022 over 50k steps. Drift los
 
 ![Batch Comparison](assets/drifting_vs_diffusion_batch.gif)
 
+## Update: Multi-Resolution Encoder Sweep
+
+After sharing our initial results, one of the paper's authors pointed us to a critical implementation detail: as noted in the paper (page 7), the method requires a feature encoder to work, and multi-resolution feature extraction (Appendix A.5) is recommended. They suggested MoCo-v2 or ConvNeXt-v2 as starting points.
+
+We took this recommendation and expanded it into a comprehensive sweep of **8 different encoder configurations**, including next-generation models like DINOv3 (Meta, Aug 2025), SigLIP-2 (Google), EVA-02, and OpenCLIP.
+
+### DINOv3 wins by a wide margin
+
+![Encoder Comparison](assets/comparison_encoders.png)
+
+**DINOv3 multi-res** (top center) produced clearly recognizable CIFAR-10 images -- dogs, horses, birds, cars, frogs, planes -- all from a single forward pass. No other encoder came close.
+
+| Rank | Encoder | Quality |
+|------|---------|---------|
+| 1 | **DINOv3 multi-res** | Recognizable objects, diverse classes |
+| 2 | DINOv2 CLS (single vector) | Blurry but semantically coherent |
+| 3 | SigLIP-2 multi-res | Decent diversity, darker/muddier |
+| 4 | MoCo-v2 multi-res | Sharp edges, weak semantics |
+| 5-8 | CLIP, DINOv2-MR, EVA-02, ConvNeXt-v2 | Poor / mode collapse |
+
+DINOv3 was trained via self-distillation from a 7B-parameter teacher on 1.7 billion images. That representational quality transfers directly into single-step generation quality. The frozen encoder never touches inference -- it only matters during training.
+
+### DINOv3 samples (50K steps, single-step generation)
+
+![DINOv3 Samples](assets/dinov3_samples.png)
+
+See [DEVLOG.md](DEVLOG.md) for full experiment details, training speeds, and analysis.
+
 ## How Drifting Works
 
 Instead of learning to predict noise (diffusion), drifting learns to map noise directly to images in one shot. During training:
@@ -142,9 +170,14 @@ torchrun --nproc_per_node=8 -m drifting_vs_diffusion.train_ddpm_ddp --steps 5000
 torchrun --nproc_per_node=8 -m drifting_vs_diffusion.train_drift_ddp \
     --encoder dinov2 --batch-size 128 --steps 50000
 
-# Bigger batch = better drift signal. Use as many GPUs as you can get.
-torchrun --nproc_per_node=8 -m drifting_vs_diffusion.train_drift_ddp \
-    --encoder dinov2 --batch-size 512 --steps 100000
+# Multi-res drifting with DINOv3 (best results)
+pip install timm transformers
+torchrun --nproc_per_node=8 -m drifting_vs_diffusion.train_drift_multires_ddp \
+    --encoder dinov3 --encoder-size 112 --batch-size 384 --steps 50000
+
+# Other encoders: eva02, siglip2, clip, dinov2-multires, mocov2, convnextv2
+torchrun --nproc_per_node=8 -m drifting_vs_diffusion.train_drift_multires_ddp \
+    --encoder siglip2 --encoder-size 224 --batch-size 384 --steps 50000
 ```
 
 ### Generate the comparison assets
@@ -177,42 +210,45 @@ The feature encoder (DINOv2 ViT-B/14, 86M params, frozen) is only used during tr
 
 ```
 drifting_vs_diffusion/
-  config.py              # Model and training configs
-  train_ddpm.py          # Single-GPU DDPM training
-  train_ddpm_ddp.py      # Multi-GPU DDP DDPM training
-  train_drift.py         # Single-GPU drifting training
-  train_drift_ddp.py     # Multi-GPU DDP drifting (ResNet-18 + DINOv2)
+  config.py                       # Model and training configs
+  train_ddpm.py                   # Single-GPU DDPM training
+  train_ddpm_ddp.py               # Multi-GPU DDP DDPM training
+  train_drift.py                  # Single-GPU drifting training
+  train_drift_ddp.py              # Multi-GPU DDP drifting (ResNet-18 + DINOv2)
+  train_drift_multires_ddp.py     # Multi-GPU multi-res encoder training (DINOv3, EVA-02, etc.)
   models/
-    unet.py              # Shared UNet architecture
-    ema.py               # Exponential moving average
+    unet.py                       # Shared UNet architecture
+    ema.py                        # Exponential moving average
   training/
-    compute_v.py         # Drift field computation
-    ddpm_utils.py        # DDPM noise schedule, DDIM sampling
+    compute_v.py                  # Drift field computation (single-vector + batched multi-res)
+    encoders.py                   # Multi-res feature encoders (8 supported)
+    ddpm_utils.py                 # DDPM noise schedule, DDIM sampling
   eval/
-    sample.py            # Sampling utilities
-    fid.py               # FID computation
+    sample.py                     # Sampling utilities
+    fid.py                        # FID computation
 
-benchmarks/              # Inference benchmark data (CSV + JSON)
-assets/                  # GIFs and comparison images
-DEVLOG.md                # Detailed development log with all experiments
+benchmarks/                       # Inference benchmark data (CSV + JSON)
+assets/                           # GIFs, comparison images, sample grids
+DEVLOG.md                         # Detailed development log with all experiments
 ```
 
 ## Development Log
 
 See [DEVLOG.md](DEVLOG.md) for the full story: every experiment we ran, every bug we hit, every insight we gained. Includes:
 
-- 5 training experiments on 8x H100 GPUs
+- 13 training experiments on 8x H100 GPUs across two rounds
 - The discovery that pixel-space drifting fails due to the curse of dimensionality
 - Why DINOv2 features are dramatically better than ResNet-18 for the drift kernel
+- Multi-resolution encoder sweep: 8 encoders tested (DINOv3, DINOv2, MoCo-v2, ConvNeXt-v2, EVA-02, SigLIP-2, CLIP)
 - Comprehensive inference profiling with CUDA event timing
 - Roadmap for kernel optimization (training and inference)
 
 ## What's Next
 
-The quality gap between drifting and diffusion is real. But DINOv2 features closed a huge chunk of it, and we've only trained at CIFAR-10 scale with global batch 1024. The path forward:
+The quality gap between drifting and diffusion is real but narrowing fast. DINOv3 features on CIFAR-10 at global batch 768 already produce recognizable objects in a single step. The path forward:
 
 1. **Scale batch size**: 1000+ GPUs, global batch 100k+. This directly improves drift signal quality.
-2. **Better feature encoders**: SigLIP, DINOv2-giant, or task-specific encoders trained for drift compatibility.
+2. **Better feature encoders**: DINOv3-Large/Giant, or task-specific encoders trained for drift compatibility. Our encoder sweep proved this is the highest-leverage variable.
 3. **Latent-space drifting**: Operate on VAE latents instead of pixels. Enables higher resolution while keeping the drift field low-dimensional.
 4. **Video**: Condition on previous frames. At 77 FPS in latent space on a 3090, real-time AI video is within reach.
 5. **Inference optimization**: TensorRT, INT8, CUDA graphs. Push toward sub-millisecond generation.

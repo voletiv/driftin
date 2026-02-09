@@ -66,3 +66,22 @@ class DriftConfig:
     log_every: int = 100
     sample_every: int = 10_000
     save_every: int = 10_000
+
+
+@dataclass
+class MultiResDriftConfig:
+    """Config for multi-resolution drift experiments."""
+    # Training
+    batch_size: int = 128
+    lr: float = 2e-4
+    ema_decay: float = 0.9999
+    max_grad_norm: float = 2.0
+    total_steps: int = 50_000
+    temperatures: List[float] = field(default_factory=lambda: [0.02, 0.05, 0.2])
+    # Multi-res encoder
+    encoder: str = "dinov2-multires"  # dinov2-multires, convnextv2, mocov2
+    pool_size: int = 4  # spatial pool target per stage
+    # Logging
+    log_every: int = 100
+    sample_every: int = 5_000
+    save_every: int = 10_000

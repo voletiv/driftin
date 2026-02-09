@@ -188,7 +188,63 @@ Raw data: `outputs/inference_bench/inference_bench.csv` and `inference_bench.jso
 
 ---
 
-## 8. The Case for Drifting at Scale
+## 8. Multi-Resolution Encoder Sweep (8xH100)
+
+After sharing our initial results, one of the paper's authors reached out with a key implementation detail: as noted in the paper (page 7), they have been unable to make the method work without a feature encoder. They recommended extracting multi-resolution features using off-the-shelf models like MoCo-v2 or ConvNeXt-v2, as detailed in Appendix A.5. The core idea is to extract per-location spatial features at multiple encoder stages rather than using a single global vector (like a CLS token or GAP output).
+
+We took this recommendation and expanded it significantly, running a total of **8 different encoder configurations** across two rounds of experiments to find the best feature representation for the drift field.
+
+### Multi-Resolution Feature Extraction
+
+Instead of a single feature vector per image, multi-res extraction produces **72 feature vectors per image** per encoder stage: 16 per-location vectors (from 4x4 adaptive pooling) + 1 global mean + 1 global std, across 4 encoder stages. Features with the same channel dimension are batched into [L, N, C] tensors for efficient drift computation via a single cdist/bmm call.
+
+### Round 1: Author-Recommended Encoders
+
+All trained for 50K steps on 8xH100 GPUs in parallel.
+
+| Encoder | Architecture | Input | GPUs | Speed | Duration |
+|---------|-------------|-------|------|-------|----------|
+| DINOv2 multi-res | ViT-B/14, layers [2,5,8,11] | 112x112 | 3 | 3.3 it/s | 4.2h |
+| MoCo-v2 multi-res | ResNet-50, 4 stages | 112x112 | 2 | 4.6 it/s | 3.0h |
+| ConvNeXt-v2 multi-res | ConvNeXt-v2-Base, 4 stages | 112x112 | 3 | 3.8 it/s | 3.7h |
+
+**Results:** Surprisingly, none of the multi-res configurations clearly beat the DINOv2 CLS single-vector approach from Exp 4. MoCo-v2 produced sharper edges but less semantically coherent objects. ConvNeXt-v2 suffered severe mode collapse (repeating dark animals). DINOv2 multi-res was more fragmented than DINOv2 CLS.
+
+### Round 2: Next-Generation Encoders
+
+Based on the Round 1 results, we hypothesized that **encoder quality matters more than the multi-res extraction strategy**. We tested 4 more encoders, including the then-newly-released DINOv3.
+
+| Encoder | Architecture | Input | GPUs | Speed | Duration |
+|---------|-------------|-------|------|-------|----------|
+| DINOv3 multi-res | ViT-B/16 (timm), layers [2,5,8,11] | 112x112 | 2 | 2.7 it/s | 3.4h |
+| EVA-02 multi-res | ViT-B/14 (timm), layers [2,5,8,11] | 224x224 | 2 | 1.4 it/s | 5.1h |
+| SigLIP-2 multi-res | ViT-B/16 (HF), layers [2,5,8,11] | 224x224 | 2 | 2.1 it/s | 4.5h |
+| CLIP multi-res | ViT-B/16 (OpenCLIP), layers [3,6,9,12] | 224x224 | 2 | 2.1 it/s | 4.6h |
+
+### Combined Results Ranking
+
+| Rank | Method | Quality | Notes |
+|------|--------|---------|-------|
+| 1 | **DINOv3 multi-res** | Clearly recognizable objects, good class diversity | Best single-step result by far |
+| 2 | DINOv2 CLS (single vector) | Blurry but semantically coherent | Still competitive despite simpler features |
+| 3 | SigLIP-2 multi-res | Decent diversity, some recognizable objects | Darker/muddier than DINOv3 |
+| 4 | MoCo-v2 multi-res | Sharp edges but hard to identify objects | Good low-level stats, weak semantics |
+| 5 | CLIP multi-res | Mostly blobs | Contrastive language-image features don't transfer well |
+| 6 | DINOv2 multi-res | Fragmented, worse than CLS | Multi-res hurt rather than helped |
+| 7 | EVA-02 multi-res | Mode collapse (red barns + deer) | Limited diversity, few repeated modes |
+| 8 | ConvNeXt-v2 multi-res | Mode collapse (all dark cattle) | Total failure |
+
+![9-way comparison](outputs/comparison_all_9_methods.png)
+
+### Key Takeaway: Encoder Representation Quality Dominates
+
+The paper author was right that feature encoders are essential, but the specific choice of encoder matters enormously. DINOv3 (trained via self-distillation from a 7B-parameter teacher on 1.7B images) produces dramatically better drift results than all other encoders, including its predecessor DINOv2. The quality of the pretrained visual representations transfers directly into generation quality.
+
+Interestingly, the multi-resolution extraction strategy was a mixed bag: it helped DINOv3 but actually hurt DINOv2 (where the CLS token alone was better). This suggests that spatial feature coherence varies significantly across encoders, and simply extracting more features doesn't guarantee better drift fields.
+
+---
+
+## 9. The Case for Drifting at Scale
 
 **Training scales with batch size.** The drift signal quality is directly proportional to how many samples participate in the kernel estimation. This is fundamentally different from DDPM, where batch size mainly affects gradient noise.
 
@@ -205,7 +261,7 @@ Raw data: `outputs/inference_bench/inference_bench.csv` and `inference_bench.jso
 
 ---
 
-## 9. TODO: Further Kernel Optimization
+## 10. TODO: Further Kernel Optimization
 
 ### Training-side optimization
 
@@ -257,36 +313,49 @@ With compile max-autotune already achieving 3.26ms at bs=1 (306 FPS), the remain
 
 ---
 
-## 10. File Reference
+## 11. File Reference
 
 ```
 drifting_vs_diffusion/
-  config.py                  -- UNetConfig, UNetLargeConfig, DDPMConfig, DriftConfig
-  train_ddpm.py              -- Single-GPU DDPM training
-  train_ddpm_ddp.py          -- Multi-GPU DDP DDPM training
-  train_drift.py             -- Single-GPU drift training
-  train_drift_ddp.py         -- Multi-GPU DDP drift training (ResNet-18 + DINOv2 encoders)
+  config.py                       -- UNetConfig, UNetLargeConfig, DDPMConfig, DriftConfig, MultiResDriftConfig
+  train_ddpm.py                   -- Single-GPU DDPM training
+  train_ddpm_ddp.py               -- Multi-GPU DDP DDPM training
+  train_drift.py                  -- Single-GPU drift training
+  train_drift_ddp.py              -- Multi-GPU DDP drift training (ResNet-18 + DINOv2 encoders)
+  train_drift_multires_ddp.py     -- Multi-GPU DDP training with multi-res encoders (pre-computed features)
   models/
-    unet.py                  -- Shared UNet (AdaGN, SelfAttention, ResBlock)
-    ema.py                   -- EMA wrapper
+    unet.py                       -- Shared UNet (AdaGN, SelfAttention, ResBlock)
+    ema.py                        -- EMA wrapper
   training/
-    compute_v.py             -- Drift field computation (cdist, softmax, weighted sum)
-    ddpm_utils.py            -- DDPM noise schedule, q_sample, DDIM sampling
+    compute_v.py                  -- Drift field computation (single-vector + batched multi-res)
+    encoders.py                   -- Multi-res feature encoders (DINOv2/v3, MoCo-v2, ConvNeXt-v2, EVA-02, SigLIP-2, CLIP)
+    ddpm_utils.py                 -- DDPM noise schedule, q_sample, DDIM sampling
   eval/
-    sample.py                -- Grid sampling utilities
-    fid.py                   -- FID computation
+    sample.py                     -- Grid sampling utilities
+    fid.py                        -- FID computation
 
-outputs/                     -- On 8xH100 remote
-  ddpm_h100/                 -- DDPM baseline (50k steps, complete)
-  drift_bs256_feat/          -- Drift + ResNet-18, bs=256/GPU (50k steps, complete)
-  drift_bs512_feat/          -- Drift + ResNet-18, bs=512/GPU (50k steps, complete)
-  drift_bs512_pixel/         -- Drift pixel-space, bs=512/GPU (killed at 10.8k steps)
-  drift_dinov2/              -- Drift + DINOv2, bs=128/GPU (50k steps, running ~34k)
-  comparison_grid.png        -- Side-by-side visual comparison
+outputs/                          -- On 8xH100 remote
+  ddpm_h100/                      -- DDPM baseline (50k steps, complete)
+  drift_bs256_feat/               -- Drift + ResNet-18, bs=256/GPU (50k steps, complete)
+  drift_bs512_feat/               -- Drift + ResNet-18, bs=512/GPU (50k steps, complete)
+  drift_bs512_pixel/              -- Drift pixel-space, bs=512/GPU (killed at 10.8k steps)
+  drift_dinov2/                   -- Drift + DINOv2 CLS, bs=128/GPU (50k steps, complete)
+  drift_dinov2_multires/          -- Drift + DINOv2 multi-res (50k steps, complete)
+  drift_mocov2/                   -- Drift + MoCo-v2 multi-res (50k steps, complete)
+  drift_convnextv2/               -- Drift + ConvNeXt-v2 multi-res (50k steps, complete)
+  drift_dinov3/                   -- Drift + DINOv3 multi-res (50k steps, complete) -- BEST
+  drift_eva02/                    -- Drift + EVA-02 multi-res (50k steps, complete)
+  drift_siglip2/                  -- Drift + SigLIP-2 multi-res (50k steps, complete)
+  drift_clip/                     -- Drift + CLIP multi-res (50k steps, complete)
+  comparison_all_9_methods.png    -- 9-way visual comparison grid
 ```
 
 ---
 
-## 11. Summary
+## 12. Summary
 
-Single-step generation via drift fields is viable. The quality gap with DDPM is real but shrinking: DINOv2 features produce recognizable CIFAR-10 images at 20k steps with a global batch of only 1024. The path forward is clear -- scale batch size during training (the drift signal improves monotonically with more samples) and use high-quality pretrained features. Inference is already 50x faster than DDPM and has significant room for further optimization via quantization, kernel fusion, and CUDA graphs.
+Single-step generation via drift fields is viable and improving rapidly. Across 9 encoder configurations, **DINOv3 multi-res** produced clearly recognizable CIFAR-10 images -- dogs, horses, birds, cars, frogs -- all from a single forward pass. The quality gap with DDPM remains significant but is narrowing with better feature encoders.
+
+The key finding from our encoder sweep: **representation quality of the frozen encoder is the single most important factor for drift generation quality.** DINOv3 (7B-param teacher, 1.7B training images) dramatically outperforms all other encoders. The multi-resolution extraction strategy matters less than the encoder itself -- DINOv2 CLS (single vector) beats DINOv2 multi-res (72 vectors), while DINOv3 multi-res is the overall winner.
+
+The path forward is clear: (1) use the best available pretrained vision encoder, (2) scale batch size during training, and (3) move to latent space for higher resolutions. Inference is already 50x faster than DDPM and has significant room for further optimization via quantization, kernel fusion, and CUDA graphs.

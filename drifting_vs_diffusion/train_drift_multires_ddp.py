@@ -201,7 +201,8 @@ def train(args):
     dist.broadcast_object_list(stamp_list, src=0)
     stamp = stamp_list[0]
 
-    out_dir = args.output_dir
+    run_name = stamp + ("_" + args.name if args.name else "")
+    out_dir = os.path.join(args.output_dir, run_name)
     if is_main:
         os.makedirs(out_dir, exist_ok=True)
         os.makedirs(os.path.join(out_dir, "samples"), exist_ok=True)

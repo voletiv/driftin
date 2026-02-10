@@ -5,9 +5,18 @@ import torch
 from torchvision.utils import make_grid, save_image
 
 
-def drift_sample(model, n, device):
-    """Generate samples from drifting model (1 forward pass)."""
-    z = torch.randn(n, 3, 32, 32, device=device)
+def drift_sample(model, n, device, z=None, shape=(3, 32, 32)):
+    """Generate samples from drifting model (1 forward pass).
+
+    Args:
+        model: Drifting UNet.
+        n: Number of samples.
+        device: torch device.
+        z: Optional noise tensor [n, C, H, W]. If None, created from shape.
+        shape: (C, H, W) when z is None. Default (3, 32, 32) for CIFAR-10.
+    """
+    if z is None:
+        z = torch.randn(n, *shape, device=device)
     with torch.no_grad():
         x = model(z)
     return x.clamp(-1, 1)

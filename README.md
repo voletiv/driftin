@@ -148,7 +148,11 @@ Conservatively, with TensorRT + INT8, a 3090 could hit **500+ FPS at 32x32** or 
 # Install
 git clone https://github.com/infatoshi/driftin.git
 cd driftin
-pip install torch torchvision
+
+python3.10 -s -m venv .driftin
+source .driftin/bin/activate
+
+uv pip install torch torchvision matplotlib
 
 # Train DDPM baseline (50k steps, ~2h on 3090)
 python -m drifting_vs_diffusion.train_ddpm
@@ -171,7 +175,7 @@ torchrun --nproc_per_node=8 -m drifting_vs_diffusion.train_drift_ddp \
     --encoder dinov2 --batch-size 128 --steps 50000
 
 # Multi-res drifting with DINOv3 (best results)
-pip install timm transformers
+uv pip install timm transformers
 torchrun --nproc_per_node=8 -m drifting_vs_diffusion.train_drift_multires_ddp \
     --encoder dinov3 --encoder-size 112 --batch-size 384 --steps 50000
 

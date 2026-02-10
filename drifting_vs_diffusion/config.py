@@ -64,7 +64,7 @@ class DriftConfig:
     use_feature_encoder: bool = False  # Start with raw pixels
     # Logging
     log_every: int = 100
-    sample_every: int = 10_000
+    sample_every: int = 1000
     save_every: int = 10_000
 
 
@@ -83,5 +83,5 @@ class MultiResDriftConfig:
     pool_size: int = 4  # spatial pool target per stage
     # Logging
     log_every: int = 100
-    sample_every: int = 5_000
+    sample_every: int = 1000
     save_every: int = 10_000

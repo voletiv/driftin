@@ -10,6 +10,7 @@ import os
 import time
 import csv
 import argparse
+from datetime import datetime
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
@@ -24,6 +25,8 @@ from .models.unet import UNet
 from .models.ema import EMA
 from .training.compute_v import compute_drift_multitemp
 from .eval.sample import drift_sample, save_sample_grid
+from .utils.plot_loss import plot_loss_curve
+from .utils.samples_to_gif import samples_to_gif
 
 
 def setup_ddp():
@@ -185,7 +188,15 @@ def train(args):
     if args.temps:
         cfg.temperatures = [float(t) for t in args.temps.split(",")]
 
-    out_dir = args.output_dir
+    if is_main:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    else:
+        stamp = None
+    stamp_list = [stamp]
+    dist.broadcast_object_list(stamp_list, src=0)
+    stamp = stamp_list[0]
+
+    out_dir = os.path.join(args.output_dir, stamp + ("_" + args.name) if args.name else "")
     if is_main:
         os.makedirs(out_dir, exist_ok=True)
         os.makedirs(os.path.join(out_dir, "samples"), exist_ok=True)
@@ -254,16 +265,19 @@ def train(args):
     log_path = os.path.join(out_dir, "loss_log.csv")
     if is_main:
         with open(log_path, "w", newline="") as f:
-            csv.writer(f).writerow(["step", "loss", "time_s", "images_per_sec"])
+            csv.writer(f).writerow(["step", "loss", "time_s", "images_per_sec", "timestamp"])
         global_bs = cfg.batch_size * world_size
         mode = encoder_name if cfg.use_feature_encoder else "pixel-space"
         print(f"Training Drifting ({mode}) for {cfg.total_steps} steps")
         print(f"  per-GPU batch={cfg.batch_size}, global batch={global_bs}")
         print(f"  temps={cfg.temperatures}")
+        print(f"  output dir: {out_dir}")
 
     start_time = time.time()
     epoch = 0
     data_iter = iter(loader)
+
+    z_sample = torch.randn(64, unet_cfg.in_ch, unet_cfg.image_size, unet_cfg.image_size, device=device)
 
     for step in range(1, cfg.total_steps + 1):
         try:
@@ -277,7 +291,7 @@ def train(args):
         B = real_images.shape[0]
 
         # Generate images from noise (UNet in bf16)
-        z = torch.randn(B, 3, 32, 32, device=device).to(memory_format=torch.channels_last)
+        z = torch.randn_like(real_images, device=device).to(memory_format=torch.channels_last)
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             gen_images = model(z)
 
@@ -307,27 +321,30 @@ def train(args):
 
         ema.update(model.module)
 
-        if step % cfg.log_every == 0 and is_main:
+        if (step == 1 or step % cfg.log_every == 0) and is_main:
             elapsed = time.time() - start_time
             steps_per_sec = step / elapsed
             imgs_per_sec = steps_per_sec * cfg.batch_size * world_size
             eta_h = (cfg.total_steps - step) / steps_per_sec / 3600
             print(
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
                 f"step {step:>7d}/{cfg.total_steps} | "
                 f"loss {loss.item():.4f} | "
                 f"{steps_per_sec:.1f} it/s ({imgs_per_sec:.0f} img/s) | "
                 f"ETA {eta_h:.1f}h"
             )
             with open(log_path, "a", newline="") as f:
-                csv.writer(f).writerow([step, f"{loss.item():.6f}", f"{elapsed:.1f}", f"{imgs_per_sec:.0f}"])
+                csv.writer(f).writerow([step, f"{loss.item():.6f}", f"{elapsed:.1f}", f"{imgs_per_sec:.0f}", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+            plot_loss_curve(log_path)
 
-        if step % cfg.sample_every == 0 and is_main:
+        if (step == 1 or step % cfg.sample_every == 0) and is_main:
             model.eval()
-            samples = drift_sample(ema.shadow, 64, device)
+            samples = drift_sample(ema.shadow, 64, device, z=z_sample)
             save_sample_grid(
                 samples,
                 os.path.join(out_dir, "samples", f"drift_step{step:07d}.png"),
             )
+            samples_to_gif(os.path.join(out_dir, "samples"), duration=300)
             model.train()
             print(f"  Saved sample grid at step {step}")
 
@@ -361,6 +378,7 @@ def train(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=str, default="outputs/drift")
+    parser.add_argument("--name", type=str, default="")
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None,
                         help="Per-GPU batch size (global = this * num_gpus)")
